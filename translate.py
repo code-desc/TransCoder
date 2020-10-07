@@ -17,7 +17,7 @@
 import argparse
 import os
 import sys
-
+from tqdm import tqdm
 import fastBPE
 import torch
 
@@ -47,6 +47,10 @@ def get_parser():
                         default="data/BPE_with_comments_codes", help="Path to BPE codes.")
     parser.add_argument("--beam_size", type=int, default=1,
                         help="Beam size. The beams will be printed in order of decreasing likelihood.")
+    
+    parser.add_argument("--json_path", type=str, default="/media/amllab-2070/Research/Code Translation/Code_Transformation/content/csn_python_final/csn_python_1.json",
+                        help="Beam size. The beams will be printed in order of decreasing likelihood.")
+    
 
     return parser
 
@@ -114,15 +118,30 @@ class Translator:
             lang2_id = self.reloaded_params.lang2id[lang2]
 
             tokens = [t for t in tokenizer(input)]
+            
             tokens = self.bpe_model.apply(tokens)
+            
+            #if len(tokens)>500:
+            #    tokens = tokens[:500]
+            #    truncated = True
+            
             tokens = ['</s>'] + tokens + ['</s>']
+            
+            
             input = " ".join(tokens)
+            truncated = False
+            if len(input.split())>512:
+                input = " ".join(input.split()[:512])
+                truncated = True
             # create batch
-            len1 = len(input.split())
-            len1 = torch.LongTensor(1).fill_(len1).to(DEVICE)
+            len1 = len(input.split(" "))
+           
 
             x1 = torch.LongTensor([self.dico.index(w)
                                    for w in input.split()]).to(DEVICE)[:, None]
+            len1 = x1.shape[0]
+            len1 = torch.LongTensor(1).fill_(len1).to(DEVICE)
+            
             langs1 = x1.clone().fill_(lang1_id)
 
             enc1 = self.encoder('fwd', x=x1, lengths=len1,
@@ -131,11 +150,13 @@ class Translator:
             if n > 1:
                 enc1 = enc1.repeat(n, 1, 1)
                 len1 = len1.expand(n)
-
+                
+            
             if beam_size == 1:
+                #print("3* len1.max().item() = ", 3 * len1.max().item())
+                #print("max len decoder", min(self.reloaded_params.max_len.to(DEVICE), 3 * len1.max().item() + 10))
                 x2, len2 = self.decoder.generate(enc1, len1, lang2_id,
-                                                 max_len=int(
-                                                     min(self.reloaded_params.max_len, 3 * len1.max().item() + 10)),
+                                                 max_len=int(min(self.reloaded_params.max_len, 3 * len1.max().item() + 10)),
                                                  sample_temperature=sample_temperature)
             else:
                 x2, len2 = self.decoder.generate_beam(enc1, len1, lang2_id,
@@ -151,7 +172,7 @@ class Translator:
             results = []
             for t in tok:
                 results.append(detokenizer(t))
-            return results
+            return results, truncated
 
 
 if __name__ == '__main__':
@@ -163,6 +184,9 @@ if __name__ == '__main__':
     assert os.path.isfile(
         params.model_path), f"The path to the model checkpoint is incorrect: {params.model_path}"
     assert os.path.isfile(
+        params.json_path), f"The path to the json file incorrect: {params.model_path}"
+    
+    assert os.path.isfile(
         params.BPE_path), f"The path to the BPE tokens is incorrect: {params.BPE_path}"
     assert params.src_lang in SUPPORTED_LANGUAGES, f"The source language should be in {SUPPORTED_LANGUAGES}."
     assert params.tgt_lang in SUPPORTED_LANGUAGES, f"The target language should be in {SUPPORTED_LANGUAGES}."
@@ -172,12 +196,39 @@ if __name__ == '__main__':
 
     # read input code from stdin
     src_sent = []
-    input = sys.stdin.read().strip()
-
+    #input = sys.stdin.read().strip()
+    #print(input)
+    import datetime
+    import json
+    with open(params.json_path, 'r') as js_file:
+        all_data = json.load(js_file)
+        
+    out_data = []
+    chunk_count = 0
+    folder_path = params.json_path.split("/")[-1][:-5]
+    if not os.path.exists(params.json_path.split("/")[-1][:-5]):
+        print("Created folder ->", folder_path)
+        os.makedirs(folder_path)
+    
     with torch.no_grad():
-        output = translator.translate(
-            input, lang1=params.src_lang, lang2=params.tgt_lang, beam_size=params.beam_size)
-
+        for data in tqdm(all_data):
+            d = data
+            #start_time = datetime.datetime.now()
+            output, truncated = translator.translate(
+                d['code'].strip(), lang1=params.src_lang, lang2=params.tgt_lang, beam_size=params.beam_size)
+            #print(datetime.datetime.now() - start_time)
+            d['transcoder_output'] = output
+            d['truncated'] = truncated
+            out_data.append(d)
+            #print(output)
+            #print("   ")
+            if len(out_data)>=1000:
+                chunk_count+=1
+                with open(folder_path+'/'+params.json_path.split("/")[-1].replace('python', 'converted_java_chunk_{}'.format(str(chunk_count))), 'w') as f:
+                    json.dump(out_data, f)
+                out_data.clear()
+    '''
     for out in output:
         print("=" * 20)
         print(out)
+    '''
